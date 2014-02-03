@@ -8,6 +8,7 @@ import signal
 import string
 import time
 from optparse import OptionParser
+from collections import defaultdict
 
 def print_err(string): print >> sys.stderr, string
 
@@ -37,8 +38,9 @@ class StackTrace(object):
         self.status = ThreadStatus()
         
 class ThreadDetails(object):
-    def __init__(self, name, prio, tid, nid):
+    def __init__(self, name, pool, prio, tid, nid):
         self.name = name
+        self.pool = pool
         self.prio = prio
         self.tid = tid
         self.nid = nid
@@ -57,6 +59,12 @@ class ThreadStatus(object):
         else:
             return False
     def __hash__(self): return hash(frozenset(self.__dict__.iteritems()))
+
+class PoolStatus(object):
+    def __init__(self, name, count, status):
+        self.name = name
+        self.count = count
+        self.status = status
 
 class ProcessError(Exception):
     pass
@@ -178,8 +186,17 @@ def build_stacks(jstack, status_dict):
             if curr is not None: 
                 add_st(curr)
             st = StackTrace()
+            mo_pool = re.search(r'^(.*)[-#][0-9]+( \([^)]+\))?$', mo_head.group(1))
+            if mo_pool is not None:
+                if mo_pool.group(2) is not None:
+                    thread_pool = mo_pool.group(1) + mo_pool.group(2)
+                else:
+                    thread_pool = mo_pool.group(1)
+            else:
+                thread_pool = None
             st.details = ThreadDetails(
                 name = mo_head.group(1), 
+                pool = thread_pool,
                 prio = int(mo_head.group(2)),
                 tid = int(mo_head.group(3), 16), 
                 nid = int(mo_head.group(4), 16)) 
@@ -310,6 +327,7 @@ def parse_args():
         "to bottom (this is the opposite to the usual Java style)")
     parser.add_option("-n", type = 'int', dest = "max_threads", default = '10', 
         help = 'maximum number of threads printed for each group. "-1" shows all. Default: %default')
+    parser.add_option('-s', action = 'store_true', dest = 'summary', help = "make a summay of the thread pools")
     options, args = parser.parse_args()
     if len(args) != 1:
         parser.error('A java pid must be supplied')
@@ -327,6 +345,23 @@ def print_stacks(stacks):
         print_stack(stack)
         print
 
+def print_pools(stacks):
+    print "THREAD POOL SUMMARY:"
+    pools = defaultdict(list)
+    for stack in stacks:
+        pools[stack.details.name if stack.details.pool is None else stack.details.pool].append(stack)
+
+    pools_status = []
+    for pool_name, stacks in pools.items():
+        member_status = defaultdict(list)
+        for stack in stacks:
+            member_status[stack.status.java_status].append(1)
+
+        pools_status.append(PoolStatus(pool_name, len(stacks), {k: len(v) for k, v in member_status.items()}))
+        
+    for pool_status in sorted(pools_status, key=lambda x: (x.count, x.name), reverse=True):    
+        print '- %s: %s %s' % (pool_status.name, pool_status.count, pool_status.status)
+
 verbose = None
 print_color = sys.stdout.isatty()
 
@@ -340,6 +375,8 @@ if __name__ == '__main__':
         if options.group:
             roots = build_frame_tree(stacks)
             print_frame_tree(roots, options.max_threads)
+        if options.summary:
+            print_pools(stacks)
         else:
             print_stacks(stacks)
     except EnvironmentError, e:
